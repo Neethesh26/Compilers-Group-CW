@@ -1,0 +1,15 @@
+# Coursework-generated build output
+/build/
+/optimised/
+/test-reports/
+
+# Compiled classes
+*.class
+
+# Local IDE / OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Local copy of the coursework brief
+/COMP0012_2025_26_CW2.pdf
