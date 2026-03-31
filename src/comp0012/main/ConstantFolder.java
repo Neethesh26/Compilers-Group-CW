@@ -3,6 +3,8 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.bcel.classfile.ClassParser;
 import org.apache.bcel.classfile.JavaClass;
 import org.apache.bcel.classfile.Method;
@@ -24,6 +26,7 @@ import org.apache.bcel.generic.FREM;
 import org.apache.bcel.generic.FSUB;
 import org.apache.bcel.generic.IADD;
 import org.apache.bcel.generic.IDIV;
+import org.apache.bcel.generic.IINC;
 import org.apache.bcel.generic.IMUL;
 import org.apache.bcel.generic.INEG;
 import org.apache.bcel.generic.IREM;
@@ -41,8 +44,11 @@ import org.apache.bcel.generic.LMUL;
 import org.apache.bcel.generic.LNEG;
 import org.apache.bcel.generic.LREM;
 import org.apache.bcel.generic.LSUB;
+import org.apache.bcel.generic.LoadInstruction;
 import org.apache.bcel.generic.MethodGen;
+import org.apache.bcel.generic.StoreInstruction;
 import org.apache.bcel.generic.TargetLostException;
+import org.apache.bcel.generic.Type;
 
 public class ConstantFolder
 {
@@ -66,6 +72,8 @@ public class ConstantFolder
 	public void optimize()
 	{
 		ClassGen cgen = new ClassGen(original);
+		cgen.setMajor(49);
+		cgen.setMinor(0);
 		ConstantPoolGen cpgen = cgen.getConstantPool();
 		InstructionFactory factory = new InstructionFactory(cgen, cpgen);
 
@@ -80,7 +88,13 @@ public class ConstantFolder
 				continue;
 			}
 
-			foldConstantArithmetic(instructionList, cpgen, factory);
+			boolean changed;
+			do {
+				changed = false;
+				changed |= replaceLoadsForSingleAssignmentConstants(instructionList, cpgen, factory);
+				changed |= foldConstantArithmetic(instructionList, cpgen, factory);
+			} while (changed);
+
 			methodGen.setMaxStack();
 			methodGen.setMaxLocals();
 			cgen.replaceMethod(method, methodGen.getMethod());
@@ -90,9 +104,10 @@ public class ConstantFolder
 		this.optimized = cgen.getJavaClass();
 	}
 
-	private void foldConstantArithmetic(InstructionList instructionList, ConstantPoolGen cpgen,
+	private boolean foldConstantArithmetic(InstructionList instructionList, ConstantPoolGen cpgen,
 			InstructionFactory factory)
 	{
+		boolean changedAny = false;
 		boolean changed;
 
 		do {
@@ -114,6 +129,7 @@ public class ConstantFolder
 
 					Number result = evaluateUnary(instruction, operand);
 					replaceInstructions(instructionList, operandHandle, handle, factory.createConstant(result));
+					changedAny = true;
 					changed = true;
 					break;
 				}
@@ -133,10 +149,109 @@ public class ConstantFolder
 				}
 
 				replaceInstructions(instructionList, leftHandle, handle, factory.createConstant(result));
+				changedAny = true;
 				changed = true;
 				break;
 			}
 		} while (changed);
+
+		return changedAny;
+	}
+
+	private boolean replaceLoadsForSingleAssignmentConstants(InstructionList instructionList, ConstantPoolGen cpgen,
+			InstructionFactory factory)
+	{
+		Map<Integer, StoreInfo> stores = new HashMap<Integer, StoreInfo>();
+
+		for (InstructionHandle handle = instructionList.getStart(); handle != null; handle = handle.getNext()) {
+			Instruction instruction = handle.getInstruction();
+			if (instruction instanceof IINC) {
+				IINC increment = (IINC) instruction;
+				StoreInfo info = stores.get(increment.getIndex());
+				if (info == null) {
+					info = new StoreInfo();
+					stores.put(increment.getIndex(), info);
+				}
+				info.count += 1;
+				info.constant = null;
+				continue;
+			}
+
+			if (!(instruction instanceof StoreInstruction)) {
+				continue;
+			}
+
+			StoreInstruction store = (StoreInstruction) instruction;
+			if (!isNumericType(store.getType(cpgen))) {
+				continue;
+			}
+
+			int index = store.getIndex();
+			StoreInfo info = stores.get(index);
+			if (info == null) {
+				info = new StoreInfo();
+				stores.put(index, info);
+			}
+
+			info.count += 1;
+			if (info.count == 1) {
+				info.constant = getNumericConstant(handle.getPrev(), cpgen);
+				info.storeHandle = handle;
+			} else {
+				info.constant = null;
+				info.storeHandle = null;
+			}
+		}
+
+		boolean changed = false;
+		for (InstructionHandle handle = instructionList.getStart(); handle != null; handle = handle.getNext()) {
+			Instruction instruction = handle.getInstruction();
+			if (!(instruction instanceof LoadInstruction)) {
+				continue;
+			}
+
+			LoadInstruction load = (LoadInstruction) instruction;
+			if (!isNumericType(load.getType(cpgen))) {
+				continue;
+			}
+
+			StoreInfo info = stores.get(load.getIndex());
+			if (info == null || info.count != 1 || info.constant == null || info.storeHandle == null) {
+				continue;
+			}
+
+			if (!comesAfter(handle, info.storeHandle)) {
+				continue;
+			}
+
+			replaceInstructions(instructionList, handle, handle, factory.createConstant(info.constant));
+			changed = true;
+		}
+
+		return changed;
+	}
+
+	private boolean comesAfter(InstructionHandle current, InstructionHandle anchor)
+	{
+		if (current == null || anchor == null || current == anchor) {
+			return false;
+		}
+
+		for (InstructionHandle cursor = anchor.getNext(); cursor != null; cursor = cursor.getNext()) {
+			if (cursor == current) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private boolean isNumericType(Type type)
+	{
+		return Type.INT.equals(type)
+				|| Type.LONG.equals(type)
+				|| Type.FLOAT.equals(type)
+				|| Type.DOUBLE.equals(type);
 	}
 
 	private boolean isUnaryArithmetic(Instruction instruction)
@@ -288,7 +403,6 @@ public class ConstantFolder
 		}
 	}
 
-	
 	public void write(String optimisedFilePath)
 	{
 		this.optimize();
@@ -297,11 +411,15 @@ public class ConstantFolder
 			FileOutputStream out = new FileOutputStream(new File(optimisedFilePath));
 			this.optimized.dump(out);
 		} catch (FileNotFoundException e) {
-			// Auto-generated catch block
 			e.printStackTrace();
 		} catch (IOException e) {
-			// Auto-generated catch block
 			e.printStackTrace();
 		}
+	}
+
+	private static final class StoreInfo {
+		private int count;
+		private Number constant;
+		private InstructionHandle storeHandle;
 	}
 }
