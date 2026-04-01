@@ -9,6 +9,7 @@ import org.apache.bcel.classfile.ClassParser;
 import org.apache.bcel.classfile.JavaClass;
 import org.apache.bcel.classfile.Method;
 import org.apache.bcel.generic.ArithmeticInstruction;
+import org.apache.bcel.generic.BranchInstruction;
 import org.apache.bcel.generic.ClassGen;
 import org.apache.bcel.generic.ConstantPoolGen;
 import org.apache.bcel.generic.ConstantPushInstruction;
@@ -68,7 +69,7 @@ public class ConstantFolder
 			e.printStackTrace();
 		}
 	}
-	
+
 	public void optimize()
 	{
 		ClassGen cgen = new ClassGen(original);
@@ -92,6 +93,7 @@ public class ConstantFolder
 			do {
 				changed = false;
 				changed |= replaceLoadsForSingleAssignmentConstants(instructionList, cpgen, factory);
+				changed |= replaceLoadsForDynamicConstants(instructionList, cpgen, factory);
 				changed |= foldConstantArithmetic(instructionList, cpgen, factory);
 			} while (changed);
 
@@ -226,6 +228,58 @@ public class ConstantFolder
 
 			replaceInstructions(instructionList, handle, handle, factory.createConstant(info.constant));
 			changed = true;
+		}
+
+		return changed;
+	}
+
+	private boolean replaceLoadsForDynamicConstants(InstructionList instructionList, ConstantPoolGen cpgen,
+			InstructionFactory factory) {
+		boolean changed = false;
+		Map<Integer, Number> knownVariables = new HashMap<>();
+
+		InstructionHandle handle = instructionList.getStart();
+		while (handle != null) {
+			InstructionHandle next = handle.getNext();
+			Instruction inst = handle.getInstruction();
+
+			InstructionTargeter[] targeters = handle.getTargeters();
+			if (targeters != null && targeters.length > 0) {
+				knownVariables.clear();
+			}
+
+			if (inst instanceof BranchInstruction) {
+				knownVariables.clear();
+			}
+
+			if (inst instanceof StoreInstruction) {
+ 				StoreInstruction store = (StoreInstruction) inst;
+				int index = store.getIndex();
+
+				Number val = getNumericConstant(handle.getPrev(), cpgen);
+
+				if (val != null && isNumericType(store.getType(cpgen))) {
+					knownVariables.put(index, val);
+				} else {
+					knownVariables.remove(index);
+				}
+			} else if (inst instanceof IINC) {
+				knownVariables.remove(((IINC) inst).getIndex());
+			} else if (inst instanceof LoadInstruction) {
+				LoadInstruction load = (LoadInstruction) inst;
+				int index = load.getIndex();
+
+				if (knownVariables.containsKey(index) && isNumericType(load.getType(cpgen))) {
+					Number currentVal = knownVariables.get(index);
+					Number existing = getNumericConstant(handle, cpgen);
+
+					if (existing == null || !existing.equals(currentVal)) {
+						replaceInstructions(instructionList, handle, handle, factory.createConstant(currentVal));
+						changed = true;
+					}
+				}
+			}
+			handle = next;
 		}
 
 		return changed;
