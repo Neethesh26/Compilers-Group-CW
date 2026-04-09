@@ -294,7 +294,7 @@ public class ConstantFolder
 
 		InstructionHandle handle = instructionList.getEnd();
 		while (handle != null) {
-			InstructionHandle prev = handle.getPrev();  // save before possible deletion
+			InstructionHandle prev = handle.getPrev();
 			Instruction ins = handle.getInstruction();
 
 			if (ins instanceof LoadInstruction) {
@@ -302,15 +302,15 @@ public class ConstantFolder
 			} else if (ins instanceof StoreInstruction) {
 				int slot = ((StoreInstruction) ins).getIndex();
 				if (neededSlots.contains(slot)) {
-					neededSlots.remove(slot);  // store is alive
+					neededSlots.remove(slot);
 				} else {
 					InstructionHandle pushHandle = handle.getPrev();
 					InstructionHandle nextHandle = handle.getNext();
 					try {
 						if (pushHandle != null && getNumericConstant(pushHandle, cpgen) != null) {
-							instructionList.delete(pushHandle, handle);  // delete both
+							instructionList.delete(pushHandle, handle);
 						} else {
-							instructionList.delete(handle);  // delete just the store
+							instructionList.delete(handle);
 						}
 						changed = true;
 					} catch (TargetLostException e) {
