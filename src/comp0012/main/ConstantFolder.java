@@ -4,6 +4,7 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import org.apache.bcel.classfile.ClassParser;
 import org.apache.bcel.classfile.JavaClass;
@@ -50,6 +51,7 @@ import org.apache.bcel.generic.MethodGen;
 import org.apache.bcel.generic.StoreInstruction;
 import org.apache.bcel.generic.TargetLostException;
 import org.apache.bcel.generic.Type;
+import java.util.Set;
 
 public class ConstantFolder
 {
@@ -95,6 +97,7 @@ public class ConstantFolder
 				changed |= replaceLoadsForSingleAssignmentConstants(instructionList, cpgen, factory);
 				changed |= replaceLoadsForDynamicConstants(instructionList, cpgen, factory);
 				changed |= foldConstantArithmetic(instructionList, cpgen, factory);
+				changed |= eliminateDeadStores(instructionList, cpgen);
 			} while (changed);
 
 			methodGen.setMaxStack();
@@ -284,6 +287,50 @@ public class ConstantFolder
 
 		return changed;
 	}
+
+	private boolean eliminateDeadStores(InstructionList instructionList, ConstantPoolGen cpgen) {
+		boolean changed = false;
+		Set<Integer> neededSlots = new HashSet<>();
+
+		InstructionHandle handle = instructionList.getEnd();
+		while (handle != null) {
+			InstructionHandle prev = handle.getPrev();
+			Instruction ins = handle.getInstruction();
+
+			if (ins instanceof LoadInstruction) {
+				neededSlots.add(((LoadInstruction) ins).getIndex());
+			} else if (ins instanceof StoreInstruction) {
+				int slot = ((StoreInstruction) ins).getIndex();
+				if (neededSlots.contains(slot)) {
+					neededSlots.remove(slot);
+				} else {
+					InstructionHandle pushHandle = handle.getPrev();
+					InstructionHandle nextHandle = handle.getNext();
+					try {
+						if (pushHandle != null && getNumericConstant(pushHandle, cpgen) != null) {
+							instructionList.delete(pushHandle, handle);
+						} else {
+							instructionList.delete(handle);
+						}
+						changed = true;
+					} catch (TargetLostException e) {
+						for (InstructionHandle lost : e.getTargets()) {
+							for (InstructionTargeter targeter : lost.getTargeters()) {
+								targeter.updateTarget(lost, nextHandle);
+							}
+						}
+						changed = true;
+					}
+					prev = pushHandle == null ? null : pushHandle.getPrev();
+				}
+			}
+
+			handle = prev;
+		}
+
+		return changed;
+	}
+
 
 	private boolean comesAfter(InstructionHandle current, InstructionHandle anchor)
 	{
